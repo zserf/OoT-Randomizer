@@ -129,24 +129,9 @@ def copy_world(world):
 
     return ret
 
-def create_playthrough(world):
-    if world.check_beatable_only and not world.can_beat_game():
-        raise RuntimeError('Uncopied is broken too.')
-    # create a copy as we will modify it
-    old_world = world
-    world = copy_world(world)
-
-    # if we only check for beatable, we can do this sanity check first before writing down spheres
-    if world.check_beatable_only and not world.can_beat_game():
-        raise RuntimeError('Cannot beat game. Something went terribly wrong here!')
-
-    # get locations containing progress items
-    prog_locations = [location for location in world.get_filled_locations() if location.item.advancement]
-    state_cache = [None]
+def create_spheres(state, locations_to_check):
+    sphere_candidates = locations_to_check
     collection_spheres = []
-    state = CollectionState(world)
-    sphere_candidates = list(prog_locations)
-    logging.getLogger('').debug('Building up collection spheres.')
     while sphere_candidates:
         state.sweep_for_events(key_only=True)
 
@@ -162,58 +147,54 @@ def create_playthrough(world):
 
         collection_spheres.append(sphere)
 
-        state_cache.append(state.copy())
-
-        logging.getLogger('').debug('Calculated sphere %i, containing %i of %i progress items.', len(collection_spheres), len(sphere), len(prog_locations))
         if not sphere:
             logging.getLogger('').debug('The following items could not be reached: %s', ['%s at %s' % (location.item.name, location.name) for location in sphere_candidates])
-            if not world.check_beatable_only:
-                raise RuntimeError('Not all progression items reachable. Something went terribly wrong here.')
-            else:
-                break
+            break
+    return collection_spheres
 
-    # in the second phase, we cull each sphere such that the game is still beatable, reducing each range of influence to the bare minimum required inside it
-    for num, sphere in reversed(list(enumerate(collection_spheres))):
-        to_delete = []
-        for location in sphere:
-            # we remove the item at location and check if game is still beatable
-            logging.getLogger('').debug('Checking if %s is required to beat the game.', location.item.name)
-            old_item = location.item
-            location.item = None
-            state.remove(old_item)
-            if world.can_beat_game(state_cache[num]):
-                to_delete.append(location)
-            else:
-                # still required, got to keep it around
-                location.item = old_item
+def find_spheres(state, locations_to_check):
+    locations_to_check_copy = locations_to_check.copy()
+    state_copy = state.copy()
+    collection_spheres = create_spheres(state_copy, locations_to_check_copy)
+    ganonSphereNum = [num for num,hasGanon in list(enumerate([any([location.name == 'Ganon' for location in sphere]) for sphere in collection_spheres])) if hasGanon][0]
+    return ganonSphereNum
 
-        # cull entries in spheres for spoiler walkthrough at end
-        for location in to_delete:
-            sphere.remove(location)
+def create_playthrough(world):
+    if world.check_beatable_only and not world.can_beat_game():
+        raise RuntimeError('Uncopied is broken too.')
+    # create a copy as we will modify it
+    old_world = world
+    world = copy_world(world)
 
-    # we are now down to just the required progress items in collection_spheres. Unfortunately
-    # the previous pruning stage could potentially have made certain items dependant on others
-    # in the same or later sphere (because the location had 2 ways to access but the item originally
-    # used to access it was deemed not required.) So we need to do one final sphere collection pass
-    # to build up the correct spheres
+    # if we only check for beatable, we can do this sanity check first before writing down spheres
+    if world.check_beatable_only and not world.can_beat_game():
+        raise RuntimeError('Cannot beat game. Something went terribly wrong here!')
 
-    required_locations = [item for sphere in collection_spheres for item in sphere]
-    state = CollectionState(world)
+    # get locations containing progress items
+    prog_locations = [location for location in world.get_filled_locations() if location.item.advancement]
     collection_spheres = []
-    while required_locations:
-        state.sweep_for_events(key_only=True)
+    state = CollectionState(world)
+    min_spheres = find_spheres(state, prog_locations)
 
-        sphere = list(filter(state.can_reach, required_locations))
+    prog_locations_copy = prog_locations.copy()
+    for location in prog_locations:
+        if location.name == 'Ganon':
+            continue
+        logging.getLogger('').debug('Checking if %s is required to beat the game.', location.item.name)
+        prog_locations_copy.remove(location)
+        old_item = location.item
+        old_state = state.copy()
 
-        for location in sphere:
-            required_locations.remove(location)
-            state.collect(location.item, True, location)
+        location.item = None
+        state.remove(old_item)
+        # we remove the item at location and check if game is still beatable in minimal number of spheres
+        if (not world.can_beat_game(state)) or (find_spheres(state, prog_locations_copy) != min_spheres):
+            state = old_state
+            location.item = old_item
+            prog_locations_copy.append(location)
 
-        collection_spheres.append(sphere)
+    collection_spheres = create_spheres(state, prog_locations_copy)
 
-        logging.getLogger('').debug('Calculated final sphere %i, containing %i of %i progress items.', len(collection_spheres), len(sphere), len(required_locations))
-        if not sphere:
-            raise RuntimeError('Not all required items reachable. Something went terribly wrong here.')
 
     # store the required locations for statistical analysis
     old_world.required_locations = [location.name for sphere in collection_spheres for location in sphere]
